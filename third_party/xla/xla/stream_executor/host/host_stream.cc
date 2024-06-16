@@ -18,7 +18,7 @@ limitations under the License.
 #include "xla/stream_executor/host/host_stream.h"
 
 #include <cfenv>  // NOLINT
-#include <cstddef>
+#include <memory>
 #include <queue>
 #include <utility>
 
@@ -27,8 +27,10 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
+#include "xla/stream_executor/event.h"
+#include "xla/stream_executor/host/host_event.h"
+#include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_common.h"
-#include "xla/stream_executor/stream_executor_pimpl.h"
 #include "tsl/platform/denormal.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/setround.h"
@@ -51,11 +53,35 @@ HostStream::~HostStream() {
   parent()->DeallocateStream(this);
 }
 
+absl::Status HostStream::WaitFor(Stream* other) {
+  auto event = std::make_shared<absl::Notification>();
+  static_cast<HostStream*>(other)->EnqueueTask([event]() { event->Notify(); });
+  EnqueueTask([event]() { event->WaitForNotification(); });
+  return absl::OkStatus();
+}
+
+absl::Status HostStream::WaitFor(Event* event) {
+  std::shared_ptr<absl::Notification> notification =
+      static_cast<HostEvent*>(event)->notification();
+  EnqueueTask([notification]() { notification->WaitForNotification(); });
+  return absl::OkStatus();
+}
+
 bool HostStream::EnqueueTask(absl::AnyInvocable<void() &&> task) {
   return EnqueueTaskWithStatus([task = std::move(task)]() mutable {
     std::move(task)();
     return absl::OkStatus();
   });
+}
+
+absl::Status HostStream::RecordEvent(Event* event) {
+  std::shared_ptr<absl::Notification> notification =
+      static_cast<HostEvent*>(event)->notification();
+  EnqueueTask([notification]() {
+    CHECK(!notification->HasBeenNotified());
+    notification->Notify();
+  });
+  return absl::OkStatus();
 }
 
 bool HostStream::EnqueueTaskWithStatus(

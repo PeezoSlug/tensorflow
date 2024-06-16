@@ -45,7 +45,6 @@ limitations under the License.
 #include "xla/stream_executor/rocm/rocm_platform_id.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "xla/stream_executor/stream_executor_interface.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/fingerprint.h"
@@ -661,22 +660,6 @@ bool GpuExecutor::HostCallback(Stream* stream,
   delete callback;
 }
 
-absl::Status GpuExecutor::RecordEvent(Stream* stream, Event* event) {
-  return AsGpuEvent(event)->Record(AsGpuStream(stream));
-}
-
-absl::Status GpuExecutor::WaitForEvent(Stream* stream, Event* event) {
-  if (GpuDriver::WaitStreamOnEvent(context_, AsGpuStream(stream)->gpu_stream(),
-                                   AsGpuEvent(event)->gpu_event())) {
-    return absl::OkStatus();
-  } else {
-    return absl::Status{
-        absl::StatusCode::kInternal,
-        absl::StrFormat("error recording waiting for ROCM event on stream %p",
-                        stream)};
-  }
-}
-
 void GpuExecutor::DeallocateStream(Stream* stream) {
   {
     absl::MutexLock lock(&mu_);
@@ -691,21 +674,6 @@ void GpuExecutor::DeallocateStream(Stream* stream) {
     LOG(ERROR) << "Deallocating stream with pending work";
   }
   rocm_stream->Destroy();
-}
-
-bool GpuExecutor::CreateStreamDependency(Stream* dependent, Stream* other) {
-  GpuEventHandle other_completed_event = *AsGpuStream(other)->completed_event();
-  bool ok = GpuDriver::RecordEvent(context_, other_completed_event,
-                                   AsGpuStreamValue(other))
-                .ok();
-  if (!ok) {
-    LOG(ERROR) << "failed to record completion event; "
-                  "therefore, failed to create inter-stream dependency";
-    return false;
-  }
-
-  return GpuDriver::WaitStreamOnEvent(context_, AsGpuStreamValue(dependent),
-                                      other_completed_event);
 }
 
 absl::Status GpuExecutor::BlockHostUntilDone(Stream* stream) {
@@ -773,12 +741,12 @@ fft::FftSupport* GpuExecutor::AsFft() {
   return fft_.get();
 }
 
-bool GpuExecutor::CanEnablePeerAccessTo(StreamExecutorInterface* other) {
+bool GpuExecutor::CanEnablePeerAccessTo(StreamExecutor* other) {
   GpuExecutor* rocm_other = static_cast<GpuExecutor*>(other);
   return GpuDriver::CanEnablePeerAccess(context_, rocm_other->context_);
 }
 
-absl::Status GpuExecutor::EnablePeerAccessTo(StreamExecutorInterface* other) {
+absl::Status GpuExecutor::EnablePeerAccessTo(StreamExecutor* other) {
   GpuExecutor* rocm_other = static_cast<GpuExecutor*>(other);
   return GpuDriver::EnablePeerAccess(context_, rocm_other->context_);
 }
@@ -796,19 +764,17 @@ absl::StatusOr<DeviceMemoryBase> GpuExecutor::GetSymbol(
   if (static_cast<bool>(module_handle)) {
     auto it = gpu_binary_to_module_.find(module_handle.id());
     CHECK(it != gpu_binary_to_module_.end());
-    if (GpuDriver::GetModuleSymbol(
-            context_, it->second.first, symbol_name.c_str(),
-            reinterpret_cast<hipDeviceptr_t*>(&mem), &bytes)) {
-      return DeviceMemoryBase(mem, bytes);
-    }
+    TF_RETURN_IF_ERROR(GpuDriver::GetModuleSymbol(
+        context_, it->second.first, symbol_name.c_str(),
+        reinterpret_cast<hipDeviceptr_t*>(&mem), &bytes));
+    return DeviceMemoryBase(mem, bytes);
   }
 
   for (auto& it : gpu_binary_to_module_) {
-    if (GpuDriver::GetModuleSymbol(
-            context_, it.second.first, symbol_name.c_str(),
-            reinterpret_cast<hipDeviceptr_t*>(&mem), &bytes)) {
-      return DeviceMemoryBase(mem, bytes);
-    }
+    TF_RETURN_IF_ERROR(GpuDriver::GetModuleSymbol(
+        context_, it.second.first, symbol_name.c_str(),
+        reinterpret_cast<hipDeviceptr_t*>(&mem), &bytes));
+    return DeviceMemoryBase(mem, bytes);
   }
 
   LOG(INFO) << "Falied to find symbol in any modules: " << symbol_name;

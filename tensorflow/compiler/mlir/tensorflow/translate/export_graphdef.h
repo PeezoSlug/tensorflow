@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_MLIR_TENSORFLOW_TRANSLATE_EXPORT_GRAPHDEF_H_
 #define TENSORFLOW_COMPILER_MLIR_TENSORFLOW_TRANSLATE_EXPORT_GRAPHDEF_H_
 
+#include "absl/base/attributes.h"
 #include "absl/container/flat_hash_set.h"
 #include "llvm/ADT/StringRef.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
@@ -29,6 +30,8 @@ limitations under the License.
 #include "tensorflow/core/graph/graph.h"
 
 namespace tensorflow {
+
+ABSL_DEPRECATED("Use tensorflow::tf2xla::api::ConvertMlirToGraphdef instead.")
 // Given an MLIR module, returns a GraphDef.
 absl::StatusOr<std::unique_ptr<GraphDef>> ConvertMlirToGraphdef(
     mlir::ModuleOp module, const GraphExportConfig& configs);
@@ -46,6 +49,7 @@ Status ConvertMlirToGraph(mlir::ModuleOp module,
 // Converts an MLIR module to TensorFlow graph and FunctionLibraryDefinition.
 // The "main" function of the module is stored in the graph and the rest of
 // functions are stored in the library.
+ABSL_DEPRECATED("Use tensorflow::tf2xla::v2::ConvertMlirToGraph instead.")
 Status ConvertMlirToGraph(mlir::ModuleOp module,
                           const GraphExportConfig& configs,
                           std::unique_ptr<Graph>* graph,

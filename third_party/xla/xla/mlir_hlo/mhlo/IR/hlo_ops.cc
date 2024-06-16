@@ -5378,8 +5378,8 @@ OpFoldResult TransposeOp::fold(FoldAdaptor adaptor) {
 }
 
 // transpose(transpose(X)) => transpose(X)
-static LogicalResult eliminateRedundantTranspse(TransposeOp op,
-                                                PatternRewriter& rewriter) {
+static LogicalResult eliminateRedundantTranspose(TransposeOp op,
+                                                 PatternRewriter& rewriter) {
   auto tranposeOperand = op.getOperand().getDefiningOp<TransposeOp>();
   if (!tranposeOperand) {
     return failure();
@@ -5453,7 +5453,7 @@ static LogicalResult simplifyTranspose(TransposeOp op,
 
 void TransposeOp::getCanonicalizationPatterns(RewritePatternSet& results,
                                               MLIRContext* /*context*/) {
-  results.add(eliminateRedundantTranspse);
+  results.add(eliminateRedundantTranspose);
   results.add(eliminateBroadcastInDimTranspose);
   results.add(simplifyTranspose);
 }
@@ -6073,6 +6073,10 @@ void WhileOp::getCanonicalizationPatterns(RewritePatternSet& results,
   results.add(&whileCanonicalization);
 }
 
+//===----------------------------------------------------------------------===//
+// UniformDequantizeOp
+//===----------------------------------------------------------------------===//
+
 LogicalResult UniformDequantizeOp::inferReturnTypeComponents(
     MLIRContext*, std::optional<Location> location, ValueShapeRange operands,
     DictionaryAttr attributes, OpaqueProperties properties, RegionRange regions,
@@ -6081,6 +6085,14 @@ LogicalResult UniformDequantizeOp::inferReturnTypeComponents(
                                        regions);
   return hlo::inferUniformDequantizeOp(location, adaptor.getOperand(),
                                        inferredReturnShapes);
+}
+
+//===----------------------------------------------------------------------===//
+// UniformQuantizeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult UniformQuantizeOp::verify() {
+  return hlo::verifyUniformQuantizeOp(getLoc(), getOperand(), getResult());
 }
 
 //===----------------------------------------------------------------------===//

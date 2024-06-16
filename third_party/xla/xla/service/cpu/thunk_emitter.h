@@ -19,12 +19,15 @@ limitations under the License.
 #include <vector>
 
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/cpu/ir_emitter2.h"
 #include "xla/service/cpu/runtime/thunk.h"
+#include "xla/service/cpu/target_machine_features.h"
+#include "xla/service/hlo_module_config.h"
 #include "xla/shape_util.h"
 
 namespace xla::cpu {
@@ -38,13 +41,20 @@ namespace xla::cpu {
 // multiple LLVM modules compiled to object files).
 class ThunkEmitter {
  public:
-  ThunkEmitter(IrEmitter2* ir_emitter,
-               const BufferAssignment* buffer_assignment);
+  ThunkEmitter(IrEmitter2& ir_emitter,
+               const BufferAssignment& buffer_assignment,
+               const TargetMachineFeatures& target_machine_features,
+               const HloModuleConfig& hlo_module_config);
 
   // Emits HLO module entry computation as a sequence of thunks.
   absl::StatusOr<ThunkSequence> EmitEntryComputation(const HloModule& module);
 
  private:
+  struct HostKernelAllocationSlices {
+    std::vector<BufferAllocation::Slice> arguments;
+    std::vector<BufferAllocation::Slice> results;
+  };
+
   // Returns the buffer allocation slice assigned to the given instruction at
   // the given shape index. Instruction must have a unique slice assigned to it!
   absl::StatusOr<BufferAllocation::Slice> GetAllocationSlice(
@@ -59,6 +69,9 @@ class ThunkEmitter {
   absl::StatusOr<ThunkSequence> EmitCallThunk(
       const HloInstruction* instruction);
 
+  absl::StatusOr<ThunkSequence> EmitConcatenateThunk(
+      const HloInstruction* instruction);
+
   absl::StatusOr<ThunkSequence> EmitCopyThunk(
       const HloInstruction* instruction);
 
@@ -71,17 +84,41 @@ class ThunkEmitter {
   absl::StatusOr<ThunkSequence> EmitReductionKernelThunk(
       const HloInstruction* instruction);
 
+  absl::StatusOr<ThunkSequence> EmitRngGetAndUpdateStateThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitInfeedThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitOutfeedThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitConditionThunk(
+      const HloInstruction* instruction);
+
   absl::StatusOr<ThunkSequence> EmitWhileThunk(
       const HloInstruction* instruction);
 
   // Returns the list of buffer allocation slices assigned to the given
-  // instruction leaf buffers. We do not materialize tuples at run time and only
-  // read and write from buffers corresponding to arrays.
-  absl::StatusOr<std::vector<BufferAllocation::Slice>> GetLeafAllocationSlices(
+  // instruction that will be passed to the host kernel as arguments: a
+  // flattened list of all the leaf buffers for all operands and result. We do
+  // not materialize tuples at run time and only read and write from buffers
+  // corresponding to arrays.
+  absl::StatusOr<HostKernelAllocationSlices> GetHostKernelAllocationSlices(
       const HloInstruction* instruction);
 
-  IrEmitter2* ir_emitter_;
-  const BufferAssignment* buffer_assignment_;
+  // Verifies that the element types of all of the given operand instructions
+  // match and are of one of the given supported types.
+  absl::Status ElementTypesSameAndSupported(
+      const HloInstruction& instruction,
+      absl::Span<const HloInstruction* const> operands,
+      absl::Span<const PrimitiveType> supported_types);
+
+  IrEmitter2& ir_emitter_;
+  const BufferAssignment& buffer_assignment_;
+
+  const TargetMachineFeatures& target_machine_features_;
+  const HloModuleConfig& hlo_module_config_;
 };
 
 }  // namespace xla::cpu

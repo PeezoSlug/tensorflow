@@ -46,8 +46,13 @@ struct Interval {
   void Print(std::ostream& out) const;
 
   bool IsPoint() const { return lower == upper; }
-  int64_t NumElements() const { return upper - lower + 1; }
   bool IsFeasible() const { return lower <= upper; }
+
+  // Returns the number of elements in the interval. Asserts that the number of
+  // elements fits in an int64_t. For this reason, this should only be used for
+  // intervals corresponding to symbols, not for general intervals. Use
+  // `IsFeasible` to check if the interval is non-empty.
+  int64_t GetLoopTripCount() const;
 
   bool Contains(int64_t value) const {
     return value >= lower && value <= upper;
@@ -77,12 +82,16 @@ struct Interval {
 
   // All comparison operators here return true or false if the result is known,
   // or nullopt if it may be either true or false.
-  ComparisonResult operator>(const Interval& b) const;
-  ComparisonResult operator<(const Interval& b) const { return b > *this; }
-  ComparisonResult operator>=(const Interval& b) const { return !(b > *this); }
-  ComparisonResult operator<=(const Interval& b) const { return !(*this > b); }
-  ComparisonResult operator==(const Interval& b) const;
-  ComparisonResult operator!=(const Interval& b) const { return !(*this == b); }
+  // We don't use operators here, because the "==" used for hashing is not the
+  // same as "Eq".
+  ComparisonResult Gt(const Interval& b) const;
+  ComparisonResult Lt(const Interval& b) const { return b.Gt(*this); }
+  ComparisonResult Ge(const Interval& b) const { return !b.Gt(*this); }
+  ComparisonResult Le(const Interval& b) const { return !this->Gt(b); }
+  // This is not the same as "==".  See the implementations.
+  ComparisonResult Eq(const Interval& b) const;
+  // This is not the same as "!=".  See the implementations.
+  ComparisonResult Ne(const Interval& b) const { return !this->Eq(b); }
 
   Interval Intersect(const Interval& rhs) const {
     Interval result{std::max(lower, rhs.lower), std::min(upper, rhs.upper)};
@@ -115,9 +124,12 @@ struct Interval {
     return {std::max(lower, rhs.lower), std::max(upper, rhs.upper)};
   }
 
-  bool Equals(const Interval& rhs) const {
+  // This is not the same as "Eq".  See the implementations.
+  bool operator==(const Interval& rhs) const {
     return lower == rhs.lower && upper == rhs.upper;
   }
+  // This is not the same as "Ne".  See the implementations.
+  bool operator!=(const Interval& rhs) const { return !(*this == rhs); }
 
   int64_t lower = 0;
   int64_t upper = 0;
@@ -128,6 +140,11 @@ std::ostream& operator<<(std::ostream& out, const Interval& range);
 template <typename H>
 H AbslHashValue(H h, const Interval& range) {
   return H::combine(std::move(h), range.lower, range.upper);
+}
+
+// For use in llvm::hash_combine.
+inline size_t hash_value(const Interval& range) {
+  return llvm::hash_combine(range.lower, range.upper);
 }
 
 // Evaluates lower and upper bounds for expressions given the domain.
@@ -245,16 +262,6 @@ class IndexingMap {
 
   // Returns an undefined indexing map.
   static IndexingMap GetUndefined() { return IndexingMap(); }
-
-  // Returns a "known" empty indexing map, i.e. () -> () affine map, no
-  // dimensions, no symbols and `is_know_empty` set to true.
-  static IndexingMap GetKnownEmpty(mlir::MLIRContext* mlir_context) {
-    IndexingMap known_empty(mlir::AffineMap::get(mlir_context),
-                            std::vector<DimVar>{}, std::vector<RangeVar>{},
-                            std::vector<RTVar>{});
-    known_empty.is_known_empty_ = true;
-    return known_empty;
-  }
 
   static IndexingMap FromTensorSizes(
       mlir::AffineMap affine_map, absl::Span<const int64_t> dim_upper_bounds,
@@ -391,8 +398,8 @@ class IndexingMap {
                     const llvm::SmallBitVector& unused_symbols);
 
   // Resets the indexing map to the canonical "known" empty indexing map, i.e.
-  // () -> () affine map, no dimensions, no symbols and `is_know_empty` set to
-  // true.
+  // (d0...)[s0...] -> (0...) affine map. Does not change the number of symbols,
+  // dimensions or results.
   void ResetToKnownEmpty();
 
   // Verify if all intervals for DimVars, RangeVars and RTVars are feasible.
@@ -439,10 +446,17 @@ template <typename H>
 H AbslHashValue(H h, const IndexingMap& indexing_map) {
   llvm::hash_code affine_map_hash =
       llvm::hash_combine(indexing_map.GetAffineMap());
-  return H::combine(std::move(h), static_cast<size_t>(affine_map_hash),
-                    indexing_map.GetDimVars(), indexing_map.GetRangeVars(),
-                    indexing_map.GetRTVars(),
-                    indexing_map.GetConstraintsCount());
+  llvm::SmallVector<size_t> constraint_hashes;
+  constraint_hashes.reserve(indexing_map.GetConstraintsCount());
+  for (const auto& [expr, interval] : indexing_map.GetConstraints()) {
+    constraint_hashes.push_back(llvm::hash_combine(expr, interval));
+  }
+  h = H::combine(std::move(h), static_cast<size_t>(affine_map_hash),
+                 indexing_map.GetDimVars(), indexing_map.GetRangeVars(),
+                 indexing_map.GetRTVars());
+  h = H::combine_unordered(std::move(h), constraint_hashes.begin(),
+                           constraint_hashes.end());
+  return h;
 }
 
 int64_t FloorDiv(int64_t dividend, int64_t divisor);

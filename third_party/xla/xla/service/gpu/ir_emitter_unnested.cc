@@ -111,6 +111,7 @@ limitations under the License.
 #include "xla/service/gpu/kernels/topk_custom_kernel.h"
 #include "xla/service/gpu/launch_dimensions.h"
 #include "xla/service/gpu/matmul_utils.h"
+#include "xla/service/gpu/model/tiled_hlo_computation.h"
 #include "xla/service/gpu/parallel_loop_emitter.h"
 #include "xla/service/gpu/runtime/command_buffer_cmd.h"
 #include "xla/service/gpu/runtime/command_buffer_cmd_emitter.h"
@@ -1592,7 +1593,7 @@ absl::Status IrEmitterUnnested::EmitTritonCustomCall(
 #else
   auto generate = [this, &instr]() -> absl::StatusOr<KernelReuseCache::Entry> {
     mlir::MLIRContext& mlir_context = *ir_emitter_context_->mlir_context();
-    mlir_context.loadDialect<mlir::triton::TritonDialect>();
+    LoadMlirDialectsForTriton(mlir_context);
     auto call =
         TritonCall::Parse(instr->raw_backend_config_string(), &mlir_context);
     auto kernel_name =
@@ -1607,15 +1608,18 @@ absl::Status IrEmitterUnnested::EmitTritonCustomCall(
     triton_fn.setName(kernel_name);
 
     HloModule* hlo_module = instr->GetModule();
-    auto gemm_config = TritonGemmConfig(
-        /*block_m=*/-1, /*block_n=*/-1, /*block_k=*/-1, /*split_k=*/-1,
-        call.num_stages, call.num_warps);
+
+    BlockLevelParameters block_level_parameters;
+    block_level_parameters.num_stages = call.num_stages;
+    block_level_parameters.num_warps = call.num_warps;
+    block_level_parameters.num_ctas = 1;
+
     TF_ASSIGN_OR_RETURN(
         auto result,
         CompileTritonToLLVM(hlo_module->config(), hlo_module->name(),
                             ir_emitter_context_->cuda_compute_capability(),
-                            ir_emitter_context_->gpu_device_info(), gemm_config,
-                            triton_module.get(),
+                            ir_emitter_context_->gpu_device_info(),
+                            block_level_parameters, triton_module.get(),
                             ir_emitter_context_->llvm_module(), mlir_context));
 
     llvm::Function* impl_fn =
@@ -2356,36 +2360,6 @@ absl::Status IrEmitterUnnested::EmitNcclAsyncDone(Thunk::Kind kind,
   return absl::OkStatus();
 }
 
-absl::Status IrEmitterUnnested::EmitWaitForStreamsThunk(
-    const HloInstruction* inst, GpuBackendConfig& gpu_config,
-    bool is_async_done) {
-  std::vector<ExecutionStreamId> wait_on_streams;
-  ExecutionStreamId source_stream_id = Thunk::kDefaultExecutionStreamId;
-  // If it's for an async done, then we need to synchronize on the execution
-  // stream of the instruction from main compute stream
-  if (is_async_done) {
-    wait_on_streams.push_back(
-        ExecutionStreamId(gpu_config.operation_queue_id()));
-  } else if (gpu_config.wait_on_operation_queues().empty()) {
-    // If wait on queue is empty, we just synchronize on the main compute
-    // stream from the execution stream.
-    wait_on_streams.push_back(Thunk::kDefaultExecutionStreamId);
-    source_stream_id = gpu_config.operation_queue_id();
-  } else {
-    // Else, we synchronize on all specified
-    // streams from the execution stream.
-    for (int64_t stream_id : gpu_config.wait_on_operation_queues()) {
-      wait_on_streams.push_back(ExecutionStreamId(stream_id));
-    }
-    source_stream_id = gpu_config.operation_queue_id();
-  }
-
-  AddThunkToThunkSequence(std::make_unique<WaitForStreamsThunk>(
-      Thunk::ThunkInfo::WithProfileAnnotation(inst), source_stream_id,
-      wait_on_streams));
-  return absl::OkStatus();
-}
-
 absl::Status IrEmitterUnnested::EmitInfeed(const HloInfeedInstruction* instr) {
   // Infeed instruction returns a tuple containing the result data and a token.
   // We only need the result data to construct the infeed thunk.
@@ -2807,27 +2781,12 @@ absl::Status IrEmitterUnnested::EmitHloInstruction(
               stream_assignment.GetAsyncExecutionStreamIds(async_done));
           AddThunkToThunkSequence(std::make_unique<WaitForStreamsThunk>(
               Thunk::ThunkInfo::WithProfileAnnotation(instr),
-              streams.source_stream_id,
-              std::vector<ExecutionStreamId>{streams.destination_stream_id}));
+              streams.source_stream_id, streams.destination_stream_id));
           return absl::OkStatus();
         }
-        default: {
-          if (wrapped->has_backend_config()) {
-            TF_ASSIGN_OR_RETURN(
-                xla::gpu::GpuBackendConfig gpu_config,
-                wrapped->backend_config<xla::gpu::GpuBackendConfig>());
-            if (gpu_config.operation_queue_id() != 0) {
-              // If there an async-done instruction that wraps an instruction
-              // that runs on a non-default stream, then we will
-              // just emit syncOnStreamThunk().
-              return EmitWaitForStreamsThunk(instr, gpu_config,
-                                             /*is_async_done=*/true);
-            }
-          }
-
+        default:
           return Internal("Unsupported async done wrapped instruction: %s",
                           HloOpcodeString(wrapped->opcode()));
-        }
       }
     }
     case HloOpcode::kAsyncStart: {
@@ -2867,30 +2826,12 @@ absl::Status IrEmitterUnnested::EmitHloInstruction(
               stream_assignment.GetAsyncExecutionStreamIds(async_start));
           AddThunkToThunkSequence(std::make_unique<WaitForStreamsThunk>(
               Thunk::ThunkInfo::WithProfileAnnotation(instr),
-              streams.destination_stream_id,
-              std::vector<ExecutionStreamId>{streams.source_stream_id}));
+              streams.destination_stream_id, streams.source_stream_id));
           return EmitFusion(Cast<HloFusionInstruction>(wrapped));
         }
-        default: {
-          if (wrapped->has_backend_config()) {
-            TF_ASSIGN_OR_RETURN(
-                xla::gpu::GpuBackendConfig gpu_config,
-                wrapped->backend_config<xla::gpu::GpuBackendConfig>());
-            if (gpu_config.operation_queue_id() != 0) {
-              // If there an async instruction that wraps an instruction
-              // that runs on a non-default stream, then we will
-              // emit syncOnStreamThunk(source=execution_stream,
-              //                        wait_on=main_compute_stream)
-              // then the thunk of wrapped instruction.
-              TF_RETURN_IF_ERROR(
-                  EmitWaitForStreamsThunk(instr, gpu_config,
-                                          /*is_async_done=*/false));
-              return EmitHloInstruction(wrapped);
-            }
-          }
+        default:
           return Internal("Unsupported async start wrapped instruction: %s",
                           HloOpcodeString(wrapped->opcode()));
-        }
       }
     }
 

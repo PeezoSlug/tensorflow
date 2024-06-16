@@ -41,6 +41,7 @@ limitations under the License.
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/FMF.h"
@@ -213,7 +214,8 @@ absl::StatusOr<llvm::Function*> IrEmitter::EmitComputation(
     HloComputation* computation, absl::string_view function_name_prefix,
     bool is_top_level_computation,
     absl::Span<HloInstruction* const> instruction_order,
-    bool allow_reassociation) {
+    bool allow_reassociation,
+    absl::Span<const llvm::Attribute::AttrKind> function_attributes) {
   std::string function_name = name_uniquer_.GetUniqueName(function_name_prefix);
   VLOG(2) << "Emitting IR for CPU function [" << function_name_prefix << "]";
   is_top_level_computation_ = is_top_level_computation;
@@ -259,6 +261,11 @@ absl::StatusOr<llvm::Function*> IrEmitter::EmitComputation(
 
   TF_RETURN_IF_ERROR(computation->AcceptOrdered(this, instruction_order));
   llvm::Function* ir_function = compute_function_->function();
+
+  for (llvm::Attribute::AttrKind attr : function_attributes) {
+    ir_function->addFnAttr(attr);
+  }
+
   InsertOrDie(&emitted_functions_,
               ComputationToEmit{computation, allow_reassociation}, ir_function);
   // Delete 'compute_function', finalizing 'ir_function' and restoring caller
@@ -940,7 +947,7 @@ absl::Status IrEmitter::HandleDot(HloInstruction* dot) {
   // Dot operation is complicated so we delegate to a helper class.
   return EmitDotOperation(*dot, target_array, lhs_array, rhs_array,
                           /*addend_array=*/nullptr,
-                          GetExecutableRunOptionsArgument(), &b_, mlir_context_,
+                          GetExecutableRunOptionsArgument(), &b_,
                           hlo_module_config_, target_machine_features_);
 }
 
@@ -2361,10 +2368,10 @@ absl::Status IrEmitter::HandleFusion(HloInstruction* fusion) {
     llvm_ir::IrArray addend_array(
         GetIrArrayFor(fusion->operand(addend_param_number)));
 
-    TF_RETURN_IF_ERROR(EmitDotOperation(
-        *dot, target_array, lhs_array, rhs_array, &addend_array,
-        GetExecutableRunOptionsArgument(), &b_, mlir_context_,
-        hlo_module_config_, target_machine_features_));
+    TF_RETURN_IF_ERROR(
+        EmitDotOperation(*dot, target_array, lhs_array, rhs_array,
+                         &addend_array, GetExecutableRunOptionsArgument(), &b_,
+                         hlo_module_config_, target_machine_features_));
     return absl::OkStatus();
   } else {
     return Unimplemented("Fusion kind not implemented on CPU");
@@ -2772,6 +2779,16 @@ absl::Status IrEmitter::HandleOneDnnLayerNorm(HloInstruction* custom_call) {
 }
 
 absl::Status IrEmitter::HandleOneDnnSoftmax(HloInstruction* custom_call) {
+  // Serialize and emit OneDnnSoftmaxConfig.
+  auto typed_custom_call = Cast<HloCustomCallInstruction>(custom_call);
+  auto backend_config = typed_custom_call->backend_config<BackendConfig>();
+  OneDnnSoftmaxConfig softmax_config;
+  softmax_config.CopyFrom(backend_config->onednn_softmax_config());
+  std::string str_config;
+  softmax_config.SerializeToString(&str_config);
+  llvm::Value* softmax_config_val =
+      b_.CreateGlobalStringPtr(llvm_ir::AsStringRef(str_config));
+
   auto input = custom_call->operand(0);
   llvm_ir::IrArray input_array(GetIrArrayFor(input));
   auto input_stack_alloca = GetAllocaAndEmitMemrefInfo(b_, input_array);
@@ -2781,11 +2798,8 @@ absl::Status IrEmitter::HandleOneDnnSoftmax(HloInstruction* custom_call) {
   auto result_stack_alloca = GetAllocaAndEmitMemrefInfo(b_, result_array);
 
   EmitCallToFunc(runtime::kOneDnnSoftmaxSymbolName,
-                 {
-                     GetExecutableRunOptionsArgument(),
-                     input_stack_alloca.value,
-                     result_stack_alloca.value,
-                 },
+                 {GetExecutableRunOptionsArgument(), input_stack_alloca.value,
+                  result_stack_alloca.value, softmax_config_val},
                  b_.getVoidTy());
 
   input_stack_alloca.EmitLifetimeEnd();
@@ -3578,9 +3592,9 @@ void IrEmitter::TracingState::EmitTracingStart(llvm::IRBuilder<>* b,
 
   auto* hlo_name = b->CreateGlobalStringPtr(hlo->name());
   auto* hlo_module = b->CreateGlobalStringPtr(hlo->GetModule()->name());
-  auto* hlo_module_id = b->getInt64(hlo->GetModule()->unique_id());
+  auto* program_id = b->getInt64(hlo->GetModule()->unique_id());
   auto* activity_id = b->CreateCall(
-      trace_func, {run_options, hlo_name, hlo_module, hlo_module_id});
+      trace_func, {run_options, hlo_name, hlo_module, program_id});
   activity_id->setName(IrName(hlo, "activity_id"));
   activity_ids_[hlo] = activity_id;
 }

@@ -101,7 +101,9 @@ cc_library(
         "//xla/service:hlo_verifier",
         "//xla/service:transfer_manager",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
+        "@local_tsl//tsl/platform:protobuf",
     ],
 )
 
@@ -598,6 +600,7 @@ xla_test(
 xla_test(
     name = "map_test",
     srcs = ["map_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":hlo_test_base",
@@ -667,6 +670,7 @@ xla_test(
 xla_test(
     name = "select_test",
     srcs = ["select_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -683,6 +687,7 @@ xla_test(
     name = "conditional_test",
     srcs = ["conditional_test.cc"],
     shard_count = 2,
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -720,6 +725,7 @@ xla_test(
         "cpu",
         "gpu",
     ],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -737,6 +743,7 @@ xla_test(
     name = "scalar_computations_test",
     srcs = ["scalar_computations_test.cc"],
     shard_count = 32,
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -779,6 +786,7 @@ xla_test(
 xla_test(
     name = "deconstruct_tuple_test",
     srcs = ["deconstruct_tuple_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":test_macros_header",
@@ -1374,6 +1382,7 @@ xla_test(
         "interpreter",
     ],
     shard_count = 40,
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":hlo_test_base",
@@ -1409,6 +1418,7 @@ xla_test(
     name = "bfloat16_test",
     srcs = ["bfloat16_test.cc"],
     shard_count = 40,
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":hlo_test_base",
@@ -1451,6 +1461,7 @@ xla_test(
         "cpu",
         "gpu",
     ],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":test_macros_header",
@@ -1472,6 +1483,7 @@ xla_test(
         "gpu",
         "interpreter",
     ],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":hlo_test_base",
@@ -1487,6 +1499,7 @@ xla_test(
     timeout = "long",
     srcs = ["slice_test.cc"],
     shard_count = 40,
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -1507,6 +1520,7 @@ xla_test(
 xla_test(
     name = "multidimensional_slice_test",
     srcs = ["multidimensional_slice_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -1525,6 +1539,7 @@ xla_test(
     timeout = "moderate",
     srcs = ["dynamic_ops_test.cc"],
     shard_count = 4,
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":hlo_test_base",
@@ -1553,6 +1568,7 @@ xla_test(
 xla_test(
     name = "tuple_test",
     srcs = ["tuple_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":hlo_test_base",
@@ -1577,6 +1593,7 @@ xla_test(
 xla_test(
     name = "vector_ops_reduce_test",
     srcs = ["vector_ops_reduce_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -1636,6 +1653,7 @@ xla_test(
         "cpu",
         "gpu",
     ],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":hlo_test_base",
         ":test_macros_header",
@@ -1685,6 +1703,7 @@ xla_test(
     shard_count = 40,
     tags = [
         "optonly",
+        "test_xla_cpu_thunks",
     ],
     xla_test_library_deps = [":reduce_window_test_library"],
     deps = [":test_macros_header"],
@@ -1746,6 +1765,7 @@ xla_test(
 xla_test(
     name = "reduce_hlo_test",
     srcs = ["reduce_hlo_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":hlo_test_base",
         ":test_macros_header",
@@ -1788,6 +1808,7 @@ xla_test(
 xla_test(
     name = "call_test",
     srcs = ["call_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -1842,6 +1863,7 @@ xla_test(
 xla_test(
     name = "binop_scaling_test",
     srcs = ["binop_scaling_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -1859,6 +1881,7 @@ xla_test(
 xla_test(
     name = "broadcast_simple_test",
     srcs = ["broadcast_simple_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -1898,6 +1921,7 @@ xla_test(
 xla_test(
     name = "fmax_fmin_test",
     srcs = ["fmax_fmin_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -1962,6 +1986,7 @@ xla_test(
         "noasan",
         "nomac",
         "nosan",
+        "test_xla_cpu_thunks",
     ],
     deps = [
         ":client_library_test_base",
@@ -2030,6 +2055,7 @@ xla_test(
 xla_test(
     name = "vector_ops_simple_test",
     srcs = ["vector_ops_simple_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -2053,6 +2079,7 @@ xla_test(
 xla_test(
     name = "concat_test",
     srcs = ["concat_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":hlo_test_base",
@@ -2232,6 +2259,7 @@ xla_test(
 xla_test(
     name = "bitcast_convert_test",
     srcs = ["bitcast_convert_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":hlo_test_base",
@@ -2407,7 +2435,10 @@ xla_test(
 xla_test(
     name = "broadcast_test",
     srcs = ["broadcast_test.cc"],
-    tags = ["test_hlo_pjrt_runner"],
+    tags = [
+        "test_hlo_pjrt_runner",
+        "test_xla_cpu_thunks",
+    ],
     deps = [
         ":hlo_test_base",
         ":literal_test_util",
@@ -2653,6 +2684,7 @@ xla_test(
 xla_test(
     name = "reshape_motion_test",
     srcs = ["reshape_motion_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -2787,6 +2819,7 @@ xla_test(
     tags = [
         # Require optimized builds, iota_test_cpu is very slow in fastbuild.
         "optonly",
+        "test_xla_cpu_thunks",
     ],
     deps = [
         ":client_library_test_base",
@@ -2900,6 +2933,7 @@ xla_test(
 xla_test(
     name = "constant_reduction_function_test",
     srcs = ["constant_reduction_function_test.cc"],
+    tags = ["test_xla_cpu_thunks"],
     deps = [
         ":hlo_test_base",
         ":literal_test_util",
@@ -2978,7 +3012,12 @@ xla_test(
         "//xla:shape_util",
         "//xla:test",
         "//xla:test_helpers",
+        "//xla/service:pattern_matcher",
+        "//xla/service:pattern_matcher_gmock",
+        "//xla/service/cpu:backend_config_proto_cc",
+        "//xla/service/cpu:onednn_ops_rewriter",
         "//xla/service/cpu:onednn_util",
+        "@com_google_absl//absl/strings",
         "@local_tsl//tsl/platform:platform_port",
     ],
 )

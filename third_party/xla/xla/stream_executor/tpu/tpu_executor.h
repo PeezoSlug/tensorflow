@@ -34,7 +34,6 @@ limitations under the License.
 #include "xla/stream_executor/memory_allocation.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "xla/stream_executor/stream_executor_interface.h"
 #include "xla/stream_executor/tpu/c_api_decl.h"
 #include "xla/stream_executor/tpu/tpu_executor_c_api.h"
 #include "xla/stream_executor/tpu/tpu_executor_interface.h"
@@ -70,8 +69,6 @@ class TpuExecutor : public tensorflow::tpu::TpuExecutorInterface {
   absl::StatusOr<std::unique_ptr<DeviceDescription>> CreateDeviceDescription()
       const override;
 
-  bool CreateStreamDependency(Stream* dependent, Stream* other) override;
-
   void DeallocateStream(Stream* stream) override;
 
   void Deallocate(const DeviceMemoryBase& memory);
@@ -90,8 +87,6 @@ class TpuExecutor : public tensorflow::tpu::TpuExecutorInterface {
 
   tensorflow::tpu::TpuCoreLocationExternal GetCoreLocationExternal()
       const override;
-
-  absl::Status GetStatus(Stream* stream) override;
 
   absl::StatusOr<std::unique_ptr<Stream>> CreateStream(
       std::optional<std::variant<StreamPriority, int>> priority =
@@ -120,9 +115,6 @@ class TpuExecutor : public tensorflow::tpu::TpuExecutorInterface {
   absl::Status SynchronousMemcpy(void* host_dst,
                                  const DeviceMemoryBase& device_src,
                                  uint64_t size) override;
-
-  absl::Status RecordEvent(Stream* stream, Event* event) override;
-  absl::Status WaitForEvent(Stream* stream, Event* event) override;
 
   absl::Status UnloadAllPrograms() override;
 
@@ -156,10 +148,10 @@ class TpuExecutor : public tensorflow::tpu::TpuExecutorInterface {
                         uint32_t pattern, uint64_t size) override {
     LOG(FATAL) << "not yet implemented";
   }
-  absl::Status EnablePeerAccessTo(StreamExecutorInterface* other) override {
+  absl::Status EnablePeerAccessTo(StreamExecutor* other) override {
     LOG(FATAL) << "not yet implemented";
   }
-  bool CanEnablePeerAccessTo(StreamExecutorInterface* other) override {
+  bool CanEnablePeerAccessTo(StreamExecutor* other) override {
     LOG(FATAL) << "not yet implemented";
   }
 

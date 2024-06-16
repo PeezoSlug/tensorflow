@@ -19,8 +19,11 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "xla/cpu_function_runtime.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -31,21 +34,35 @@ limitations under the License.
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/cpu/ir_emitter2.h"
 #include "xla/service/cpu/runtime/call_thunk.h"
+#include "xla/service/cpu/runtime/conditional_thunk.h"
 #include "xla/service/cpu/runtime/copy_thunk.h"
+#include "xla/service/cpu/runtime/infeed_thunk.h"
 #include "xla/service/cpu/runtime/kernel_thunk.h"
+#include "xla/service/cpu/runtime/outfeed_thunk.h"
+#include "xla/service/cpu/runtime/rng_state_thunk.h"
 #include "xla/service/cpu/runtime/thunk.h"
 #include "xla/service/cpu/runtime/while_thunk.h"
+#include "xla/service/cpu/target_machine_features.h"
+#include "xla/service/hlo_module_config.h"
+#include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/status_macros.h"
 #include "xla/stream_executor/launch_dim.h"
+#include "xla/util.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
 #include "tsl/platform/statusor.h"
 
 namespace xla::cpu {
 
-ThunkEmitter::ThunkEmitter(IrEmitter2* ir_emitter,
-                           const BufferAssignment* buffer_assignment)
-    : ir_emitter_(ir_emitter), buffer_assignment_(buffer_assignment) {}
+ThunkEmitter::ThunkEmitter(IrEmitter2& ir_emitter,
+                           const BufferAssignment& buffer_assignment,
+                           const TargetMachineFeatures& target_machine_features,
+                           const HloModuleConfig& hlo_module_config)
+    : ir_emitter_(ir_emitter),
+      buffer_assignment_(buffer_assignment),
+      target_machine_features_(target_machine_features),
+      hlo_module_config_(hlo_module_config) {}
 
 static Thunk::Info ThunkInfo(const HloInstruction* instruction) {
   const HloModule* module = instruction->GetModule();
@@ -63,7 +80,7 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitEntryComputation(
 
 absl::StatusOr<BufferAllocation::Slice> ThunkEmitter::GetAllocationSlice(
     const HloInstruction* instruction, const ShapeIndex& index) {
-  return buffer_assignment_->GetUniqueSlice(instruction, index);
+  return buffer_assignment_.GetUniqueSlice(instruction, index);
 }
 
 absl::StatusOr<ThunkSequence> ThunkEmitter::EmitHloComputation(
@@ -102,8 +119,15 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitHloInstruction(
     case HloOpcode::kAfterAll:
       return ThunkSequence::Empty();
 
+    // Call operations are simply converted to a ThunkSequence emitted from the
+    // called computation and embedded into the "main" one.
+    case HloOpcode::kCall:
+      return EmitCallThunk(instruction);
+
     // Control flow thunks check predicates on the host and launch nested thunk
     // sequences for branches and loops.
+    case HloOpcode::kConditional:
+      return EmitConditionThunk(instruction);
     case HloOpcode::kWhile:
       return EmitWhileThunk(instruction);
 
@@ -120,6 +144,7 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitHloInstruction(
     case HloOpcode::kAnd:
     case HloOpcode::kAtan2:
     case HloOpcode::kBroadcast:
+    case HloOpcode::kBitcastConvert:
     case HloOpcode::kCbrt:
     case HloOpcode::kCeil:
     case HloOpcode::kClamp:
@@ -137,6 +162,7 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitHloInstruction(
     case HloOpcode::kIsFinite:
     case HloOpcode::kLog1p:
     case HloOpcode::kLog:
+    case HloOpcode::kMap:
     case HloOpcode::kMaximum:
     case HloOpcode::kMinimum:
     case HloOpcode::kMultiply:
@@ -151,6 +177,7 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitHloInstruction(
     case HloOpcode::kRoundNearestAfz:
     case HloOpcode::kRoundNearestEven:
     case HloOpcode::kRsqrt:
+    case HloOpcode::kSelect:
     case HloOpcode::kShiftLeft:
     case HloOpcode::kShiftRightArithmetic:
     case HloOpcode::kShiftRightLogical:
@@ -163,6 +190,17 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitHloInstruction(
     case HloOpcode::kXor:
       return EmitElementalKernelThunk(instruction);
 
+    // TODO(ezhulenev): Implement slice operations as separate Thunks because
+    // it's much easier to get peak performance from hand written code.
+    case HloOpcode::kSlice:
+    case HloOpcode::kDynamicSlice:
+    // TODO(ezhulenev): Port dynamic update slice optimizations from IrEmitter.
+    case HloOpcode::kDynamicUpdateSlice:
+      return EmitElementalKernelThunk(instruction);
+
+    case HloOpcode::kConcatenate:
+      return EmitConcatenateThunk(instruction);
+
     case HloOpcode::kFusion:
       return EmitFusionKernelThunk(instruction);
 
@@ -170,8 +208,14 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitHloInstruction(
     case HloOpcode::kReduceWindow:
       return EmitReductionKernelThunk(instruction);
 
-    case HloOpcode::kCall:
-      return EmitCallThunk(instruction);
+    case HloOpcode::kRngGetAndUpdateState:
+      return EmitRngGetAndUpdateStateThunk(instruction);
+
+    case HloOpcode::kInfeed:
+      return EmitInfeedThunk(instruction);
+
+    case HloOpcode::kOutfeed:
+      return EmitOutfeedThunk(instruction);
 
     case HloOpcode::kCopy:
       return EmitCopyThunk(instruction);
@@ -192,6 +236,12 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCallThunk(
                                       std::move(called_sequence));
 }
 
+absl::StatusOr<ThunkSequence> ThunkEmitter::EmitConcatenateThunk(
+    const HloInstruction* instruction) {
+  // TODO(ezhulenev): Port optimized concat implementation from IrEmitter.
+  return EmitElementalKernelThunk(instruction);
+}
+
 absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCopyThunk(
     const HloInstruction* instruction) {
   const HloInstruction* source = instruction->operand(0);
@@ -205,37 +255,102 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCopyThunk(
 absl::StatusOr<ThunkSequence> ThunkEmitter::EmitElementalKernelThunk(
     const HloInstruction* instruction) {
   TF_ASSIGN_OR_RETURN(auto kernel,
-                      ir_emitter_->EmitElementalHostKernel(instruction));
-  TF_ASSIGN_OR_RETURN(auto buffers, GetLeafAllocationSlices(instruction));
+                      ir_emitter_.EmitElementalHostKernel(instruction));
+  TF_ASSIGN_OR_RETURN(auto buffers, GetHostKernelAllocationSlices(instruction));
 
-  // TODO(ezhulenev): IrEmitter should return requested ThreadDim for a kernel
-  // invocation, for now we assume that we always emit a full loop.
-  return ThunkSequence::Of<KernelThunk>(ThunkInfo(instruction), buffers,
-                                        kernel.name, se::ThreadDim());
+  return ThunkSequence::Of<KernelThunk>(
+      ThunkInfo(instruction), buffers.arguments, buffers.results, kernel.name,
+      kernel.thread_dims, /*min_alignment=*/cpu_function_runtime::MinAlign());
 }
 
 absl::StatusOr<ThunkSequence> ThunkEmitter::EmitFusionKernelThunk(
     const HloInstruction* instruction) {
   auto* fusion = Cast<HloFusionInstruction>(instruction);
-  TF_ASSIGN_OR_RETURN(auto kernel, ir_emitter_->EmitFusionHostKernel(fusion));
-  TF_ASSIGN_OR_RETURN(auto buffers, GetLeafAllocationSlices(instruction));
+  TF_ASSIGN_OR_RETURN(auto kernel, ir_emitter_.EmitFusionHostKernel(fusion));
+  TF_ASSIGN_OR_RETURN(auto buffers, GetHostKernelAllocationSlices(instruction));
 
-  // TODO(ezhulenev): IrEmitter should return requested ThreadDim for a kernel
-  // invocation, for now we assume that we always emit a full loop.
-  return ThunkSequence::Of<KernelThunk>(ThunkInfo(instruction), buffers,
-                                        kernel.name, se::ThreadDim());
+  return ThunkSequence::Of<KernelThunk>(
+      ThunkInfo(instruction), buffers.arguments, buffers.results, kernel.name,
+      kernel.thread_dims, /*min_alignment=*/cpu_function_runtime::MinAlign());
 }
 
 absl::StatusOr<ThunkSequence> ThunkEmitter::EmitReductionKernelThunk(
     const HloInstruction* instruction) {
   TF_ASSIGN_OR_RETURN(auto kernel,
-                      ir_emitter_->EmitReductionHostKernel(instruction));
-  TF_ASSIGN_OR_RETURN(auto buffers, GetLeafAllocationSlices(instruction));
+                      ir_emitter_.EmitReductionHostKernel(instruction));
+  TF_ASSIGN_OR_RETURN(auto buffers, GetHostKernelAllocationSlices(instruction));
 
-  // TODO(ezhulenev): IrEmitter should return requested ThreadDim for a kernel
-  // invocation, for now we assume that we always emit a full loop.
-  return ThunkSequence::Of<KernelThunk>(ThunkInfo(instruction), buffers,
-                                        kernel.name, se::ThreadDim());
+  return ThunkSequence::Of<KernelThunk>(
+      ThunkInfo(instruction), buffers.arguments, buffers.results, kernel.name,
+      kernel.thread_dims, /*min_alignment=*/cpu_function_runtime::MinAlign());
+}
+
+absl::StatusOr<ThunkSequence> ThunkEmitter::EmitRngGetAndUpdateStateThunk(
+    const HloInstruction* instruction) {
+  TF_ASSIGN_OR_RETURN(auto state_buffer, GetAllocationSlice(instruction));
+  auto* rng_state = Cast<HloRngGetAndUpdateStateInstruction>(instruction);
+  return ThunkSequence::Of<RngGetAndUpdateStateThunk>(
+      ThunkInfo(instruction), state_buffer, rng_state->delta());
+}
+
+absl::StatusOr<ThunkSequence> ThunkEmitter::EmitInfeedThunk(
+    const HloInstruction* instruction) {
+  auto* infeed = Cast<HloInfeedInstruction>(instruction);
+  const Shape& infeed_shape = infeed->infeed_shape();
+
+  // Collect buffer allocation slices corresponding to data buffers produced by
+  // the infeed instruction;
+  std::vector<InfeedThunk::InfeedBuffer> infeed_buffers;
+  for (auto& infeed_leaf : ShapeUtil::GetLeafShapes(infeed_shape)) {
+    infeed_leaf.index.push_front(0);  // prepend infeed tuple index
+
+    TF_ASSIGN_OR_RETURN(BufferAllocation::Slice infeed_slice,
+                        GetAllocationSlice(infeed, infeed_leaf.index));
+
+    infeed_buffers.push_back(InfeedThunk::InfeedBuffer{
+        infeed_slice,
+        infeed_leaf.shape,
+    });
+  }
+
+  return ThunkSequence::Of<InfeedThunk>(ThunkInfo(instruction), infeed_buffers);
+}
+
+absl::StatusOr<ThunkSequence> ThunkEmitter::EmitOutfeedThunk(
+    const HloInstruction* instruction) {
+  auto* outfeed = Cast<HloOutfeedInstruction>(instruction);
+  const Shape& outfeed_shape = outfeed->outfeed_shape();
+
+  // Collect buffer allocation slices corresponding to data buffers fed into the
+  // outfeed instruction as first operand.
+  std::vector<OutfeedThunk::OutfeedBuffer> outfeed_buffers;
+  for (auto& outfeed_leaf : ShapeUtil::GetLeafShapes(outfeed_shape)) {
+    TF_ASSIGN_OR_RETURN(
+        BufferAllocation::Slice outfeed_slice,
+        GetAllocationSlice(outfeed->operand(0), outfeed_leaf.index));
+
+    outfeed_buffers.push_back(OutfeedThunk::OutfeedBuffer{
+        outfeed_slice,
+        outfeed_leaf.shape,
+    });
+  }
+
+  return ThunkSequence::Of<OutfeedThunk>(ThunkInfo(instruction),
+                                         outfeed_buffers);
+}
+
+absl::StatusOr<ThunkSequence> ThunkEmitter::EmitConditionThunk(
+    const HloInstruction* instruction) {
+  std::vector<ThunkSequence> branches;
+  TF_ASSIGN_OR_RETURN(auto branch_index_buffer,
+                      GetAllocationSlice(instruction->operand(0)));
+
+  for (HloComputation* branch : instruction->branch_computations()) {
+    TF_ASSIGN_OR_RETURN(branches.emplace_back(), EmitHloComputation(branch));
+  }
+
+  return ThunkSequence::Of<ConditionalThunk>(
+      ThunkInfo(instruction), branch_index_buffer, std::move(branches));
 }
 
 absl::StatusOr<ThunkSequence> ThunkEmitter::EmitWhileThunk(
@@ -253,21 +368,45 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitWhileThunk(
                                        std::move(body_thunk));
 }
 
-absl::StatusOr<std::vector<BufferAllocation::Slice>>
-ThunkEmitter::GetLeafAllocationSlices(const HloInstruction* instruction) {
-  std::vector<BufferAllocation::Slice> buffers;
-  auto add_buffers = [&](const HloInstruction* instr) -> absl::Status {
+absl::StatusOr<ThunkEmitter::HostKernelAllocationSlices>
+ThunkEmitter::GetHostKernelAllocationSlices(const HloInstruction* instruction) {
+  HostKernelAllocationSlices slices;
+
+  auto add_buffers = [&](std::vector<BufferAllocation::Slice>& buffers,
+                         const HloInstruction* instr) -> absl::Status {
     for (const auto& indexed : ShapeUtil::GetLeafShapes(instr->shape())) {
       TF_ASSIGN_OR_RETURN(buffers.emplace_back(),
                           GetAllocationSlice(instr, indexed.index));
     }
     return absl::OkStatus();
   };
+
   for (HloInstruction* operand : instruction->operands()) {
-    TF_RETURN_IF_ERROR(add_buffers(operand));
+    TF_RETURN_IF_ERROR(add_buffers(slices.arguments, operand));
   }
-  TF_RETURN_IF_ERROR(add_buffers(instruction));
-  return buffers;
+
+  TF_RETURN_IF_ERROR(add_buffers(slices.results, instruction));
+
+  return slices;
+}
+
+absl::Status ThunkEmitter::ElementTypesSameAndSupported(
+    const HloInstruction& instruction,
+    absl::Span<const HloInstruction* const> operands,
+    absl::Span<const PrimitiveType> supported_types) {
+  for (auto operand : operands) {
+    TF_RET_CHECK(
+        ShapeUtil::SameElementType(operands[0]->shape(), operand->shape()));
+  }
+
+  TF_RET_CHECK(!operands.empty());
+  PrimitiveType primitive_type = operands[0]->shape().element_type();
+  if (!absl::c_linear_search(supported_types, primitive_type)) {
+    return Unimplemented("unsupported operand type %s in op %s",
+                         PrimitiveType_Name(primitive_type),
+                         HloOpcodeString(instruction.opcode()));
+  }
+  return absl::OkStatus();
 }
 
 }  // namespace xla::cpu

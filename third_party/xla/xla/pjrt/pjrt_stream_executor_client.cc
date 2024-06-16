@@ -128,6 +128,7 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_tree.h"
 #include "xla/shape_util.h"
+#include "xla/status_macros.h"
 #include "xla/statusor.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
@@ -3073,7 +3074,7 @@ PjRtStreamExecutorLoadedExecutable::Execute(
           << "; num_replicas=" << num_replicas()
           << " num_partitions=" << num_partitions()
           << " num_addressable_devices=" << num_addressable_devices;
-  std::vector<StatusOr<Result>> results(num_addressable_devices);
+  std::vector<absl::StatusOr<Result>> results(num_addressable_devices);
   if (num_addressable_devices == 1 && !ThisThreadIsInsideHostCallback()) {
     // Fast-path if there is only one device — run the computation on the
     // current thread.
@@ -3347,6 +3348,11 @@ PjRtStreamExecutorClient::Compile(const XlaComputation& computation,
                                   CompileOptions options) {
   tsl::profiler::TraceMe traceme("PjRtStreamExecutorClient::Compile");
   VLOG(1) << "PjRtStreamExecutorClient::Compile";
+  options.executable_build_options.set_process_index(process_index());
+  TF_RET_CHECK(device_count() % addressable_device_count() == 0)
+      << "Each process is expected to have the same number of devices";
+  options.executable_build_options.set_process_count(
+      device_count() / addressable_device_count());
   auto input_options = options;
 
   TF_RETURN_IF_ERROR(options.ApplyAllOptionOverrides());
